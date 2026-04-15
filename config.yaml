@@ -1,0 +1,88 @@
+# 中町兄妹 切り抜き動画自動生成 設定ファイル
+channel:
+  name: "中町兄妹"
+  # チャンネルIDは初回起動時に自動検出します
+  # 手動設定する場合はここに記入
+  channel_id: ""
+  search_query: "中町兄妹"
+
+paths:
+  output_dir: "./output"
+  temp_dir: "./temp"
+  data_dir: "./data"
+  fonts_dir: "./fonts"
+  logs_dir: "./logs"
+
+download:
+  quality: "bestvideo[height<=1080]+bestaudio/best[height<=1080]"
+  format: "mp4"
+  max_filesize: "2G"
+
+transcription:
+  # whisperモデル: tiny, base, small, medium, large
+  # スマホ: small推奨 / PC: medium推奨
+  whisper_model: "small"
+  language: "ja"
+  # OCRエンジン: easyocr
+  ocr_engine: "easyocr"
+  # フレーム抽出間隔(秒)
+  frame_interval: 0.25
+  # 字幕領域 (画面下部の割合)
+  subtitle_region_ratio: 0.20
+
+clips:
+  # 1動画あたりの切り抜き数
+  count: 3
+  # 最小・最大の長さ(秒)
+  min_duration: 20
+  max_duration: 60
+
+subtitles:
+  font_name: "けいふぉんと"
+  # 通常テロップ
+  normal_font_size: 48
+  # 強調テロップ
+  emphasis_font_size: 64
+  # ストローク(白)
+  stroke_color: "FFFFFF"
+  stroke_width: 3
+  # 中町綾(女性): ピンク
+  aya_color: "FF69B4"
+  # 中町純平(男性): シアン
+  junpei_color: "00FFFF"
+  # 字幕位置(画面下部からのマージン)
+  margin_v: 30
+
+video:
+  # ズーム倍率(元の焼き込みテロップを隠す)
+  zoom_factor: 1.15
+  # エンコード品質
+  crf: 18
+  # コーデック
+  codec: "libx264"
+  # 出力形式
+  output_format: "mp4"
+
+monitor:
+  # チェック間隔(秒) - 5分
+  check_interval: 300
+  # RSS URL (channel_id設定後に自動生成)
+  rss_url: ""
+
+insights:
+  enabled: true
+  data_file: "./data/insights.json"
+  history_file: "./data/history.json"
+
+phone:
+  # スマホ最適化モード
+  optimized: true
+  # バッテリー節約(処理中のみWakeLock)
+  battery_save: true
+  # 通知
+  notification: true
+
+logging:
+  level: "INFO"
+  file: "./logs/automation.log"
+  max_size_mb: 50
