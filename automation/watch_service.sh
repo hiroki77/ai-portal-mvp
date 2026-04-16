@@ -1,23 +1,37 @@
 #!/bin/bash
-# 手動起動用スクリプト
-# 実行: bash automation/watch_service.sh
-
+# 手動起動 / 停止 / ステータス確認
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$PROJECT_DIR"
 
-# 既存プロセス確認
-if [ -f /tmp/youtube_automation.pid ]; then
-    OLD_PID=$(cat /tmp/youtube_automation.pid)
-    if kill -0 "$OLD_PID" 2>/dev/null; then
-        echo "既に実行中 (PID: $OLD_PID)"
-        echo "停止する場合: kill $OLD_PID"
-        exit 1
+case "${1:-start}" in
+  start)
+    if [ -f /tmp/yt_auto.pid ] && kill -0 "$(cat /tmp/yt_auto.pid)" 2>/dev/null; then
+      echo "既に実行中 (PID: $(cat /tmp/yt_auto.pid))"
+      exit 0
     fi
-fi
-
-echo "監視開始..."
-termux-wake-lock 2>/dev/null || true
-nohup python main.py >> logs/automation.log 2>&1 &
-echo $! > /tmp/youtube_automation.pid
-echo "PID: $(cat /tmp/youtube_automation.pid)"
-echo "ログ: tail -f logs/automation.log"
+    termux-wake-lock 2>/dev/null || true
+    nohup python main.py >> logs/automation.log 2>&1 &
+    echo $! > /tmp/yt_auto.pid
+    echo "監視開始 (PID: $(cat /tmp/yt_auto.pid))"
+    echo "ログ: tail -f logs/automation.log"
+    ;;
+  stop)
+    if [ -f /tmp/yt_auto.pid ]; then
+      kill "$(cat /tmp/yt_auto.pid)" 2>/dev/null && echo "停止しました"
+      rm -f /tmp/yt_auto.pid
+    else
+      echo "実行中のプロセスなし"
+    fi
+    termux-wake-unlock 2>/dev/null || true
+    ;;
+  status)
+    if [ -f /tmp/yt_auto.pid ] && kill -0 "$(cat /tmp/yt_auto.pid)" 2>/dev/null; then
+      echo "実行中 (PID: $(cat /tmp/yt_auto.pid))"
+    else
+      echo "停止中"
+    fi
+    ;;
+  *)
+    echo "Usage: $0 {start|stop|status}"
+    ;;
+esac
