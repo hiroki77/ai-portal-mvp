@@ -15,20 +15,16 @@ download:
 transcription:
   whisper_model: "small"
   language: "ja"
-  # OCR方式: openai (GPT-4o Vision) or easyocr
-  ocr_engine: "openai"
-  # OpenAI APIキー (環境変数 OPENAI_API_KEY でも可)
-  openai_api_key: ""
-  openai_model: "gpt-4o"
-  # フレーム抽出間隔(秒)
+  # OCR: gemini (Gemini 2.0 Flash無料枚) / easyocr (フォールバック)
+  ocr_engine: "gemini"
+  # Gemini APIキー (無料: https://aistudio.google.com/apikey)
+  # 環境変数 GEMINI_API_KEY でも可
+  gemini_api_key: ""
+  gemini_model: "gemini-2.0-flash"
   frame_interval: 0.5
-  # 字幕領域(画面下部の割合)
   subtitle_region_ratio: 0.20
-  # 1回のAPIリクエストに送るフレーム数
-  batch_size: 5
-  # APIリトライ回数
+  batch_size: 4
   max_retries: 3
-  # APIタイムアウト(秒)
   api_timeout: 30
 clips:
   count: 3
@@ -51,6 +47,19 @@ video:
 monitor:
   check_interval: 300
   rss_url: ""
+# Google Drive設定
+drive:
+  enabled: true
+  # 方式: rclone / shared_storage
+  # rclone: rcloneでGoogle Driveにアップロード
+  # shared_storage: Android共有ストレージに保存(Driveアプリが自動同期)
+  method: "rclone"
+  # rcloneのリモート名 (rclone configで設定)
+  rclone_remote: "gdrive"
+  # Drive上の保存先フォルダ
+  remote_folder: "中町兄妹_切り抜き"
+  # shared_storage方式の保存先
+  shared_path: "/storage/emulated/0/Movies/切り抜き"
 insights:
   enabled: true
   data_file: "./data/insights.json"
