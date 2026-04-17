@@ -1,13 +1,23 @@
-"""トピックセグメント分割 & クリップ選定
-字幕データから話題の切れ目を検出し、
-20秒～60秒の話がまとまるクリップを選定
+"""話題分割 & クリップ選定
+Gemini 2.0 Flashで全トランスクリプトを分析し、
+話の導入→展開→オチが綺麗に収まる20-60秒のクリップを3本選定
 """
-import logging
+import os
 import re
+import json
+import time
+import logging
 from dataclasses import dataclass
-from typing import List, Dict, Optional
+from typing import List, Optional
 
 logger = logging.getLogger(__name__)
+
+try:
+    from google import genai
+    from google.genai import types as gtypes
+except ImportError:
+    genai = None
+    gtypes = None
 
 
 @dataclass
@@ -17,6 +27,7 @@ class ClipSegment:
     subtitles: list
     score: float = 0.0
     topic_summary: str = ""
+    reason: str = ""
 
     @property
     def duration(self):
@@ -24,21 +35,6 @@ class ClipSegment:
 
 
 class TopicSegmenter:
-    # 話題切れ目を示すキーワード
-    TOPIC_BREAK_WORDS = [
-        "で", "でさ", "というわけで", "ということで",
-        "次", "じゃあ", "ところで", "ちなみに",
-        "あと", "それで", "あのさ", "えーと",
-        "もう一つ", "続いて", "最後に",
-    ]
-    # バズりやすいキーワード
-    VIRAL_WORDS = [
-        "やばい", "マジ", "ウソ", "笑", "草",
-        "可愛い", "かわいい", "無理", "ワロタ",
-        "神", "最高", "キモい", "えぐい",
-        "怖い", "可哀想う", "おもろい",
-        "善い", "エモい", "泣く", "泣いた",
-    ]
 
     def __init__(self, config):
         self.config = config
@@ -46,155 +42,212 @@ class TopicSegmenter:
         self.max_dur = config["clips"]["max_duration"]
         self.clip_count = config["clips"]["count"]
 
+        tc = config["transcription"]
+        self._gemini = None
+        self._model = tc.get("gemini_model", "gemini-2.0-flash")
+        gkey = tc.get("gemini_api_key", "") or os.environ.get("GEMINI_API_KEY", "")
+        if gkey and genai:
+            self._gemini = genai.Client(api_key=gkey)
+
     def select_clips(self, subtitles, video_path, preferences=None):
-        """字幕データからベスト3クリップを選定"""
         if not subtitles:
             return []
 
-        # 1. 話題の境界を検出
-        boundaries = self._find_topic_boundaries(subtitles)
+        # Geminiで知的に選定
+        if self._gemini:
+            clips = self._select_with_gemini(subtitles, preferences)
+            if clips:
+                return clips
+            logger.warning("Gemini分割失敗、ルールベースにフォールバック")
 
-        # 2. 候補クリップを生成
-        candidates = self._generate_candidates(subtitles, boundaries)
+        # フォールバック: ルールベース
+        return self._select_rule_based(subtitles, preferences)
 
-        # 3. スコアリング
-        for clip in candidates:
-            clip.score = self._score_clip(clip, preferences)
+    # =============================================================
+    # Gemini AI 話題分割
+    # =============================================================
 
-        # 4. 重複しないトップ3を選定
-        selected = self._select_non_overlapping(candidates, self.clip_count)
-        logger.info(f"{len(selected)}クリップ選定完了")
-        for i, c in enumerate(selected):
-            logger.info(f"  Clip{i+1}: {c.start:.1f}s-{c.end:.1f}s ({c.duration:.1f}s) score={c.score:.2f}")
-        return selected
+    def _select_with_gemini(self, subtitles, preferences=None):
+        # 全字幕をタイムスタンプ付きテキストに変換
+        transcript_lines = []
+        for s in subtitles:
+            speaker = {"aya": "綾", "junpei": "純平"}.get(s.speaker, "不明")
+            transcript_lines.append(
+                f"[{s.start:.1f}-{s.end:.1f}] {speaker}: {s.text}"
+            )
+        transcript = "\n".join(transcript_lines)
 
-    def _find_topic_boundaries(self, subtitles):
-        boundaries = [0]
-        for i, sub in enumerate(subtitles):
-            if i == 0:
-                continue
-            prev = subtitles[i - 1]
-            # 無音区間(2秒以上)
-            if sub.start - prev.end > 2.0:
-                boundaries.append(i)
-                continue
-            # 話題切れ目キーワード
-            for word in self.TOPIC_BREAK_WORDS:
-                if sub.text.startswith(word):
-                    boundaries.append(i)
-                    break
-            # 話者切り替わり(連続3回同じ話者から別の話者)
-            if i >= 2:
-                if (subtitles[i-1].speaker == subtitles[i-2].speaker and
-                        sub.speaker != subtitles[i-1].speaker and
-                        sub.speaker != "unknown"):
-                    boundaries.append(i)
-        boundaries.append(len(subtitles))
-        return sorted(set(boundaries))
+        # インサイト情報
+        boost_info = ""
+        if preferences:
+            kws = preferences.get("boost_keywords", [])
+            if kws:
+                boost_info = f"\n過去にバズったキーワード: {", ".join(kws)}"
+            pref_dur = preferences.get("preferred_duration", 0)
+            if pref_dur:
+                boost_info += f"\n過去にバズった平均時間: {pref_dur}秒"
 
-    def _generate_candidates(self, subtitles, boundaries):
-        candidates = []
-        n = len(boundaries)
-        for i in range(n - 1):
-            for j in range(i + 1, n):
-                start_idx = boundaries[i]
-                end_idx = boundaries[j]
-                if end_idx > len(subtitles):
-                    break
-                subs = subtitles[start_idx:end_idx]
-                if not subs:
+        prompt = (
+            "以下は中町兄妹(YouTubeチャンネル)の動画の全字幕データです。"
+            "形式: [開始秒-終了秒] 話者: テキスト\n\n"
+            f"{transcript}\n\n"
+            "この動画から切り抜き動画を作ります。以下の条件で最適な3箇所を選んでください。\n\n"
+            "【必須条件】\n"
+            f"- 各1クリップは{self.min_dur}秒以上{self.max_dur}秒以内\n"
+            "- 話の導入→展開→オチ(結論)まで綺麗に収まること\n"
+            "- 話の途中で切れないこと\n"
+            "- 3クリップは時間が重複しないこと\n\n"
+            "【優先条件】\n"
+            "- 兄妹の掛け合いが面白い部分\n"
+            "- リアクションが大きい部分(笑い、驚き、ツッコミ)\n"
+            "- バズりやすいキャッチーな話題\n"
+            "- 感情の起伏がある部分\n"
+            f"{boost_info}\n\n"
+            "【出力形式】JSON配列のみ。説明不要。\n"
+            '[{"start": 開始秒, "end": 終了秒, "topic": "話題の要約", '
+            '"reason": "選定理由", "score": 1-10のバズり予測}, ...]'
+        )
+
+        for attempt in range(3):
+            try:
+                resp = self._gemini.models.generate_content(
+                    model=self._model,
+                    contents=gtypes.Content(
+                        parts=[gtypes.Part.from_text(prompt)],
+                        role="user",
+                    ),
+                    config=gtypes.GenerateContentConfig(
+                        temperature=0.3,
+                        max_output_tokens=1500,
+                    ),
+                )
+                raw = resp.text.strip()
+                m = re.search(r'\[.*\]', raw, re.DOTALL)
+                if not m:
                     continue
-                start_t = subs[0].start
-                end_t = subs[-1].end
-                dur = end_t - start_t
-                if self.min_dur <= dur <= self.max_dur:
-                    candidates.append(ClipSegment(
-                        start=start_t,
-                        end=end_t,
-                        subtitles=subs,
+
+                items = json.loads(m.group())
+                clips = []
+                for item in items[:self.clip_count]:
+                    start = float(item["start"])
+                    end = float(item["end"])
+                    dur = end - start
+                    if dur < self.min_dur or dur > self.max_dur:
+                        # 範囲外なら調整
+                        if dur < self.min_dur:
+                            end = start + self.min_dur
+                        elif dur > self.max_dur:
+                            end = start + self.max_dur
+
+                    clip_subs = [
+                        s for s in subtitles
+                        if s.start >= start and s.end <= end
+                    ]
+                    clips.append(ClipSegment(
+                        start=start,
+                        end=end,
+                        subtitles=clip_subs,
+                        score=float(item.get("score", 5)),
+                        topic_summary=item.get("topic", ""),
+                        reason=item.get("reason", ""),
                     ))
+
+                if clips:
+                    for i, c in enumerate(clips):
+                        logger.info(
+                            f"  Clip{i+1}: {c.start:.1f}s-{c.end:.1f}s "
+                            f"({c.duration:.0f}s) score={c.score} "
+                            f"「{c.topic_summary}」 {c.reason}"
+                        )
+                    return clips
+
+            except Exception as e:
+                logger.warning(f"Geminiセグメントエラー (attempt {attempt+1}): {e}")
+                if attempt < 2:
+                    time.sleep(2 ** attempt)
+
+        return []
+
+    # =============================================================
+    # ルールベース フォールバック
+    # =============================================================
+
+    TOPIC_BREAK_WORDS = [
+        "で", "でさ", "というわけで", "次", "じゃあ",
+        "ところで", "ちなみに", "あと", "それで",
+        "えーと", "最後に",
+    ]
+    VIRAL_WORDS = [
+        "やばい", "マジ", "笑", "可愛い", "無理",
+        "神", "最高", "おもろい", "怖い", "泣く", "エモい",
+    ]
+
+    def _select_rule_based(self, subtitles, preferences=None):
+        bounds = self._find_boundaries(subtitles)
+        cands = self._gen_candidates(subtitles, bounds)
+        for c in cands:
+            c.score = self._score(c, preferences)
+        return self._select_top(cands, self.clip_count)
+
+    def _find_boundaries(self, subs):
+        b = [0]
+        for i in range(1, len(subs)):
+            if subs[i].start - subs[i - 1].end > 2.0:
+                b.append(i)
+                continue
+            for w in self.TOPIC_BREAK_WORDS:
+                if subs[i].text.startswith(w):
+                    b.append(i)
+                    break
+        b.append(len(subs))
+        return sorted(set(b))
+
+    def _gen_candidates(self, subs, bounds):
+        cands = []
+        for i in range(len(bounds) - 1):
+            for j in range(i + 1, len(bounds)):
+                sl = subs[bounds[i]:bounds[j]]
+                if not sl:
+                    continue
+                dur = sl[-1].end - sl[0].start
+                if self.min_dur <= dur <= self.max_dur:
+                    cands.append(ClipSegment(
+                        start=sl[0].start, end=sl[-1].end, subtitles=sl))
                 if dur > self.max_dur:
                     break
-        # スライディングウィンドウで追加候補
-        if len(candidates) < self.clip_count * 3:
-            candidates += self._sliding_window_candidates(subtitles)
-        return candidates
+        return cands
 
-    def _sliding_window_candidates(self, subtitles):
-        candidates = []
-        for target_dur in [30, 45, 25, 55]:
-            for i in range(len(subtitles)):
-                subs = []
-                for j in range(i, len(subtitles)):
-                    subs.append(subtitles[j])
-                    dur = subtitles[j].end - subtitles[i].start
-                    if dur >= target_dur:
-                        if self.min_dur <= dur <= self.max_dur:
-                            candidates.append(ClipSegment(
-                                start=subtitles[i].start,
-                                end=subtitles[j].end,
-                                subtitles=list(subs),
-                            ))
-                        break
-        return candidates
-
-    def _score_clip(self, clip, preferences=None):
+    def _score(self, clip, prefs=None):
         score = 0.0
         text = " ".join(s.text for s in clip.subtitles)
-
-        # バズキーワード
-        for word in self.VIRAL_WORDS:
-            if word in text:
+        for w in self.VIRAL_WORDS:
+            if w in text:
                 score += 3.0
-
-        # 会話の掛け合い(話者切り替わりが多いと良い)
-        speaker_changes = 0
-        for i in range(1, len(clip.subtitles)):
-            if (clip.subtitles[i].speaker != clip.subtitles[i-1].speaker and
-                    clip.subtitles[i].speaker != "unknown" and
-                    clip.subtitles[i-1].speaker != "unknown"):
-                speaker_changes += 1
-        score += speaker_changes * 2.0
-
-        # 30-45秒が理想
+        changes = sum(
+            1 for i in range(1, len(clip.subtitles))
+            if clip.subtitles[i].speaker != clip.subtitles[i - 1].speaker
+            and clip.subtitles[i].speaker != "unknown"
+        )
+        score += changes * 2.0
         if 30 <= clip.duration <= 45:
             score += 5.0
-        elif 25 <= clip.duration <= 50:
-            score += 3.0
-
-        # 字幕密度(適度な密度が良い)
-        density = len(clip.subtitles) / max(clip.duration, 1)
-        if 0.3 <= density <= 0.8:
-            score += 3.0
-
-        # 強調テロップがある(盛り上がりポイント)
-        emphasis_count = sum(1 for s in clip.subtitles if s.style == "emphasis")
-        score += emphasis_count * 2.5
-
-        # インサイト反映
-        if preferences:
-            for kw in preferences.get("boost_keywords", []):
+        emphasis = sum(1 for s in clip.subtitles if s.style == "emphasis")
+        score += emphasis * 2.5
+        if prefs:
+            for kw in prefs.get("boost_keywords", []):
                 if kw in text:
                     score += 4.0
-            preferred_dur = preferences.get("preferred_duration", 0)
-            if preferred_dur > 0:
-                dur_diff = abs(clip.duration - preferred_dur)
-                score += max(0, 5.0 - dur_diff * 0.2)
-
         clip.topic_summary = text[:50]
         return score
 
-    def _select_non_overlapping(self, candidates, count):
-        candidates.sort(key=lambda c: c.score, reverse=True)
-        selected = []
-        for clip in candidates:
-            overlap = False
-            for sel in selected:
-                if not (clip.end <= sel.start or clip.start >= sel.end):
-                    overlap = True
-                    break
-            if not overlap:
-                selected.append(clip)
-            if len(selected) >= count:
+    def _select_top(self, cands, count):
+        cands.sort(key=lambda c: c.score, reverse=True)
+        sel = []
+        for c in cands:
+            if not any(
+                not (c.end <= s.start or c.start >= s.end) for s in sel
+            ):
+                sel.append(c)
+            if len(sel) >= count:
                 break
-        return selected
+        return sel
