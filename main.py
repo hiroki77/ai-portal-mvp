@@ -20,13 +20,15 @@ def process(mon,dl,tr,seg,proc,ins,drv):
                 vp=dl.download(v["url"])
                 subs=tr.recognize(vp)
                 clips=seg.select_clips(subs,vp,ins.get_preferences())
-                for i,c in enumerate(clips[:3]):
-                    out=proc.create_clip(vp,c,subs,i+1)
+                # 並列クリップ生成
+                outputs=proc.create_clips_parallel(vp,clips,subs)
+                for i,out in enumerate(outputs):
+                    c=clips[i] if i<len(clips) else clips[-1]
                     ins.record_clip({"duration":c.duration,"score":c.score,"topic":c.topic_summary})
                     drv.upload(out)
                     logger.info(f"Clip{i+1} -> Drive: {out}")
                 mon.mark_processed(v["id"])
-                send_termux_notification("完了",f"{v['title']} 3本作成・Drive保存済")
+                send_termux_notification("完了",f"{v['title']} {len(outputs)}本作成・Drive保存済")
             except Exception as e:
                 logger.error(f"Error: {e}",exc_info=True)
                 send_termux_notification("エラー",str(e)[:100])
