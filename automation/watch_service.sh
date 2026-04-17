@@ -1,24 +1,28 @@
 #!/bin/bash
-# 手動起動 / 停止 / ステータス確認
-PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-cd "$PROJECT_DIR"
+# 手動起動/停止/ステータス/ログ
+PD="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$PD"
 
 case "${1:-start}" in
   start)
     if [ -f /tmp/yt_auto.pid ] && kill -0 "$(cat /tmp/yt_auto.pid)" 2>/dev/null; then
-      echo "既に実行中 (PID: $(cat /tmp/yt_auto.pid))"
+      echo "実行中 (PID: $(cat /tmp/yt_auto.pid))"
       exit 0
     fi
     termux-wake-lock 2>/dev/null || true
-    nohup python main.py >> logs/automation.log 2>&1 &
+    nohup python watchdog.py >> logs/watchdog.log 2>&1 &
     echo $! > /tmp/yt_auto.pid
     echo "監視開始 (PID: $(cat /tmp/yt_auto.pid))"
-    echo "ログ: tail -f logs/automation.log"
+    echo "ログ: bash $0 log"
     ;;
   stop)
     if [ -f /tmp/yt_auto.pid ]; then
-      kill "$(cat /tmp/yt_auto.pid)" 2>/dev/null && echo "停止しました"
+      PID=$(cat /tmp/yt_auto.pid)
+      kill "$PID" 2>/dev/null
+      # 子プロセス(main.py)も停止
+      pkill -P "$PID" 2>/dev/null
       rm -f /tmp/yt_auto.pid
+      echo "停止しました"
     else
       echo "実行中のプロセスなし"
     fi
@@ -27,11 +31,16 @@ case "${1:-start}" in
   status)
     if [ -f /tmp/yt_auto.pid ] && kill -0 "$(cat /tmp/yt_auto.pid)" 2>/dev/null; then
       echo "実行中 (PID: $(cat /tmp/yt_auto.pid))"
+      echo "最新ログ:"
+      tail -5 logs/automation.log 2>/dev/null
     else
       echo "停止中"
     fi
     ;;
+  log)
+    tail -f logs/automation.log
+    ;;
   *)
-    echo "Usage: $0 {start|stop|status}"
+    echo "Usage: $0 {start|stop|status|log}"
     ;;
 esac
