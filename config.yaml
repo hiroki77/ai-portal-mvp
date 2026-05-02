@@ -1,6 +1,6 @@
 channel:
   name: "中町兄妹"
-  channel_id: ""
+  channel_id: ""                 # YouTubeチャンネルIDをここに設定
   search_query: "中町兄妹"
 paths:
   output_dir: "./output"
@@ -13,16 +13,26 @@ download:
   format: "mp4"
   max_filesize: "2G"
 transcription:
-  whisper_model: "small"
   language: "ja"
+
+  # ===== Whisper =====
+  # whisper_engine: api   → OpenAI Whisper API ・高速・おすすめ
+  # whisper_engine: local → ローカル実行・無料・遅い
+  whisper_engine: "api"
+  whisper_model: "small"         # local時のみ使用
+  openai_api_key: ""             # または環境変数 OPENAI_API_KEY
+
+  # ===== Gemini OCR =====
+  # 話者識別(綾=ピンク/純平=シアン)とテロップ読み取りに使用
   ocr_engine: "gemini"
-  gemini_api_key: ""
+  gemini_api_key: ""             # または環境変数 GEMINI_API_KEY
   gemini_model: "gemini-2.0-flash"
   frame_interval: 0.5
   subtitle_region_ratio: 0.20
   batch_size: 4
   max_retries: 3
   api_timeout: 30
+
 clips:
   count: 3
   min_duration: 20
@@ -50,16 +60,11 @@ drive:
   rclone_remote: "gdrive"
   remote_folder: "中町兄妹_切り抜き"
   shared_path: "/storage/emulated/0/Movies/切り抜き"
-# TikTok自動投稿
 tiktok:
-  enabled: false          # trueにすると自動投稿
-  cookies_file: "./tiktok_cookies.txt"   # 初回認証で生成
-  hashtags:
-    - "#中町兄妹"
-    - "#切り抜き"
-    - "#shorts"
-    - "#tiktok"
-  schedule_delay_min: 0   # 投稿前の待機分数 (0=即投稿)
+  enabled: false
+  cookies_file: "./tiktok_cookies.txt"
+  hashtags: ["#中町兄妹", "#切り抜き", "#shorts", "#tiktok"]
+  schedule_delay_min: 0
 insights:
   enabled: true
   data_file: "./data/insights.json"
