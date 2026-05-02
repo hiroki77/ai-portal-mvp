@@ -1,0 +1,12 @@
+yt-dlp>=2024.1.0
+openai-whisper>=20231117
+google-genai>=1.0.0
+easyocr>=1.7.1
+numpy>=1.24.0
+opencv-python-headless>=4.8.0
+Pillow>=10.0.0
+schedule>=1.2.0
+pyyaml>=6.0.1
+feedparser>=6.0.11
+torch>=2.0.0
+torchaudio>=2.0.0

@@ -1,0 +1,74 @@
+channel:
+  name: "中町兄妹"
+  channel_id: ""
+  search_query: "中町兄妹"
+paths:
+  output_dir: "./output"
+  temp_dir: "./temp"
+  data_dir: "./data"
+  fonts_dir: "./fonts"
+  logs_dir: "./logs"
+download:
+  quality: "bestvideo[height<=1080]+bestaudio/best[height<=1080]"
+  format: "mp4"
+  max_filesize: "2G"
+transcription:
+  whisper_model: "small"
+  language: "ja"
+  # OCR: gemini (Gemini 2.0 Flash無料枚) / easyocr (フォールバック)
+  ocr_engine: "gemini"
+  # Gemini APIキー (無料: https://aistudio.google.com/apikey)
+  # 環境変数 GEMINI_API_KEY でも可
+  gemini_api_key: ""
+  gemini_model: "gemini-2.0-flash"
+  frame_interval: 0.5
+  subtitle_region_ratio: 0.20
+  batch_size: 4
+  max_retries: 3
+  api_timeout: 30
+clips:
+  count: 3
+  min_duration: 20
+  max_duration: 60
+subtitles:
+  font_name: "けいふぉんと"
+  normal_font_size: 48
+  emphasis_font_size: 64
+  stroke_color: "FFFFFF"
+  stroke_width: 3
+  aya_color: "FF69B4"
+  junpei_color: "00FFFF"
+  margin_v: 30
+video:
+  zoom_factor: 1.15
+  crf: 18
+  codec: "libx264"
+  output_format: "mp4"
+monitor:
+  check_interval: 300
+  rss_url: ""
+# Google Drive設定
+drive:
+  enabled: true
+  # 方式: rclone / shared_storage
+  # rclone: rcloneでGoogle Driveにアップロード
+  # shared_storage: Android共有ストレージに保存(Driveアプリが自動同期)
+  method: "rclone"
+  # rcloneのリモート名 (rclone configで設定)
+  rclone_remote: "gdrive"
+  # Drive上の保存先フォルダ
+  remote_folder: "中町兄妹_切り抜き"
+  # shared_storage方式の保存先
+  shared_path: "/storage/emulated/0/Movies/切り抜き"
+insights:
+  enabled: true
+  data_file: "./data/insights.json"
+  history_file: "./data/history.json"
+phone:
+  optimized: true
+  battery_save: true
+  notification: true
+logging:
+  level: "INFO"
+  file: "./logs/automation.log"
+  max_size_mb: 50
