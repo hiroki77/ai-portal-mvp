@@ -1,4 +1,4 @@
-import os, re, json, time, logging
+import os, re, json, time, logging, subprocess
 from dataclasses import dataclass
 logger = logging.getLogger(__name__)
 try:
@@ -47,6 +47,11 @@ _GAP_STRONG  = 1.2   # この秒数以上の無音 → 強制的に文境界
 _GAP_WEAK    = 0.5   # 弱い文末 + この秒数以上 → 文境界
 MAX_SNAP_SEC = 12.0  # スナップの最大幅（秒）。これを超えて戻る/進むことは禁止
 
+# 音声無音スナップ: FFmpeg silencedetect パラメータ
+_SILENCE_NOISE_DB  = '-40dB'   # 無音と判定する音量閾値
+_SILENCE_DURATION  = '0.15'    # 無音と判定する最短継続時間（秒）
+_SILENCE_MAX_SEEK  = 1.5       # 無音スナップの最大探索幅（秒）
+
 
 @dataclass
 class ClipSegment:
@@ -83,8 +88,9 @@ class TopicSegmenter:
         if not subs:
             return []
         af = audio_features or self._extract_audio_features(video_path)
+        silences = self._detect_audio_silences(video_path)
         if self._g:
-            clips = self._two_phase(subs, pref, af)
+            clips = self._two_phase(subs, pref, af, silences)
             if clips:
                 return clips
             logger.warning('2フェーズ失敗, fallback')
@@ -392,6 +398,85 @@ class TopicSegmenter:
         return result
 
     # ================================================================
+    # 音声無音スナップ（FFmpeg silencedetect）
+    # ================================================================
+
+    def _detect_audio_silences(self, video_path) -> list:
+        """
+        FFmpeg silencedetect で動画の無音区間を検出する。
+        Returns: list of (silence_start_sec, silence_end_sec) tuples
+        """
+        try:
+            result = subprocess.run(
+                ['ffmpeg', '-i', str(video_path),
+                 '-af', f'silencedetect=n={_SILENCE_NOISE_DB}:d={_SILENCE_DURATION}',
+                 '-f', 'null', '-'],
+                capture_output=True, text=True, timeout=300
+            )
+            silences = []
+            pending_start = None
+            for line in result.stderr.split('\n'):
+                m = re.search(r'silence_start: ([\d.]+)', line)
+                if m:
+                    pending_start = float(m.group(1))
+                m = re.search(r'silence_end: ([\d.]+)', line)
+                if m and pending_start is not None:
+                    silences.append((pending_start, float(m.group(1))))
+                    pending_start = None
+            logger.info(f'silencedetect: {len(silences)}個の無音区間を検出')
+            return silences
+        except Exception as e:
+            logger.warning(f'silencedetect失敗（スキップ）: {e}')
+            return []
+
+    def _silence_snap(self, clips: list, silences: list,
+                      max_seek: float = _SILENCE_MAX_SEEK) -> list:
+        """
+        クリップのstart/endを最寄りの無音区間にスナップ。
+        - start → clip_start の直前にある silence_end（max_seek 秒以内）
+        - end   → clip_end  の直後にある silence_start（max_seek 秒以内）
+        無音が見つからない場合はそのまま。
+        """
+        if not silences:
+            return clips
+
+        result = []
+        for c in clips:
+            new_start = c.start
+            new_end   = c.end
+
+            # start: clip_start より前にある最も近い silence_end を探す
+            best_end = None
+            best_dist = max_seek
+            for s_start, s_end in silences:
+                if s_end <= c.start:
+                    dist = c.start - s_end
+                    if dist < best_dist:
+                        best_dist = dist
+                        best_end = s_end
+            if best_end is not None:
+                new_start = round(best_end, 3)
+                logger.info(f'  SILENCE START スナップ: {c.start:.3f}s → {new_start:.3f}s')
+
+            # end: clip_end より後にある最も近い silence_start を探す
+            best_start = None
+            best_dist = max_seek
+            for s_start, s_end in silences:
+                if s_start >= c.end:
+                    dist = s_start - c.end
+                    if dist < best_dist:
+                        best_dist = dist
+                        best_start = s_start
+            if best_start is not None:
+                new_end = round(best_start, 3)
+                logger.info(f'  SILENCE END   スナップ: {c.end:.3f}s → {new_end:.3f}s')
+
+            c.start = new_start
+            c.end   = new_end
+            result.append(c)
+        return result
+
+    # ================================================================
     # Phase 3: 完結性バリデーション（AI最終確認）
     # ================================================================
 
@@ -402,13 +487,9 @@ class TopicSegmenter:
         「完結していない」と判定されたら fallback_pool から次点を試す。
         """
         result = []
-        used_starts = {c.start for c in clips}
-        fb_iter = iter(fallback_pool or [])
-
         for c in clips:
             fixed = self._validate_one(c, all_subs)
             result.append(fixed)
-
         return result
 
     def _validate_one(self, clip: ClipSegment, all_subs: list) -> ClipSegment:
@@ -479,7 +560,7 @@ class TopicSegmenter:
     # 統合パイプライン
     # ================================================================
 
-    def _two_phase(self, subs, pref=None, af=None):
+    def _two_phase(self, subs, pref=None, af=None, silences=None):
         logger.info('Phase1: 話題境界を検出中...')
         topics = self._phase1_topics(subs)
         if not topics:
@@ -498,6 +579,10 @@ class TopicSegmenter:
         logger.info('発話境界スナップ（ハードルール）...')
         top_clips = self._enforce_sentence_boundaries(top_clips, subs)
 
+        if silences:
+            logger.info('音声無音スナップ（FFmpeg silencedetect）...')
+            top_clips = self._silence_snap(top_clips, silences)
+
         logger.info('Phase3: 完結性バリデーション...')
         top_clips = self._phase3_validate(top_clips, subs, fallback_clips)
 
@@ -512,7 +597,7 @@ class TopicSegmenter:
 
     def _extract_audio_features(self, video_path):
         try:
-            import subprocess, numpy as np
+            import numpy as np
             result = subprocess.run(
                 ['ffmpeg', '-i', str(video_path), '-af',
                  'astats=metadata=1:reset=1,ametadata=print:key=lavfi.astats.Overall.RMS_level',
