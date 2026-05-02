@@ -16,14 +16,13 @@ transcription:
   language: "ja"
 
   # ===== Whisper =====
-  # whisper_engine: api   → OpenAI Whisper API ・高速・おすすめ
-  # whisper_engine: local → ローカル実行・無料・遅い
+  # whisper_engine: api   → OpenAI Whisper API（高速・推奨）
+  # whisper_engine: local → ローカル実行（無料・遅い）
   whisper_engine: "api"
   whisper_model: "small"         # local時のみ使用
   openai_api_key: ""             # または環境変数 OPENAI_API_KEY
 
   # ===== Gemini OCR =====
-  # 話者識別(綾=ピンク/純平=シアン)とテロップ読み取りに使用
   ocr_engine: "gemini"
   gemini_api_key: ""             # または環境変数 GEMINI_API_KEY
   gemini_model: "gemini-2.0-flash"
@@ -38,7 +37,9 @@ clips:
   min_duration: 20
   max_duration: 60
 subtitles:
-  font_name: "けいふぉんと"
+  # クラウド（Ubuntu/GitHub Actions）では Noto Sans CJK JP が使える
+  # スマホ（Termux）では「けいふぉんと」を fonts/ に置いて変更
+  font_name: "Noto Sans CJK JP"
   normal_font_size: 48
   emphasis_font_size: 64
   stroke_color: "FFFFFF"

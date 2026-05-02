@@ -1,0 +1,11 @@
+# クラウド実行用（GitHub Actions）
+# torch/easyocr は不要（Whisper API + Gemini OCR を使用）
+yt-dlp>=2024.1.0
+openai>=1.0.0
+google-genai>=1.0.0
+numpy>=1.24.0
+opencv-python-headless>=4.8.0
+Pillow>=10.0.0
+schedule>=1.2.0
+pyyaml>=6.0.1
+feedparser>=6.0.11
