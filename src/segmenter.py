@@ -9,11 +9,43 @@ except ImportError:
 
 from src.cost_tracker import get_tracker
 
-# 接続助詞（文の途中を示すパターン）
-_CONTINUATION_START = ('て、', 'で、', 'けど、', 'けど', 'から、', 'し、', 'が、', 'って、', 'って')
-_CONTINUATION_END   = ('て', 'で', 'けど', 'から', 'し', 'が', 'って', 'ながら', 'たら')
-_SENTENCE_FINAL     = ('。', '！', '？', '笑', 'ね', 'よ', 'わ', 'か', 'な', 'ん', '〜', '!', '?')
-_SNAP_GAP_SEC       = 0.5   # 前後の字幕との間隔がこれ以上なら文境界とみなす
+# ================================================================
+# 発話境界スナップ定数
+# ================================================================
+
+# 接続助詞: この語で始まる字幕 = 前の文の続き
+_CONTINUATION_START = (
+    # 標準
+    'て、', 'で、', 'けど、', 'けど', 'から、', 'し、', 'が、',
+    'って、', 'って', 'ので、', 'のに、', 'のに',
+    'だから、', 'だって、', 'だけど、', 'だけど',
+    # 関西弁・若者言葉（中町兄妹特有）
+    'やから', 'やから、', 'やけど', 'やけど、',
+    'やし、', 'やし', 'やって', 'やって、',
+)
+
+# 接続助詞: この語で終わる字幕 = まだ文が続いている
+_CONTINUATION_END = (
+    # 標準
+    'て', 'で', 'けど', 'から', 'し', 'が', 'って',
+    'ながら', 'たら', 'ので', 'のに', 'だけど', 'だから',
+    'てて', 'ても', 'ても、',
+    # 仮定・条件
+    'ば', 'と',
+    # 関西弁・若者言葉
+    'やん', 'やけど', 'やから', 'やし', 'やって',
+    'やで', 'やな', 'てて',
+)
+
+# 強い文末: これで終わる → 無条件で文末と判定
+_SENTENCE_FINAL_STRONG = ('。', '！', '？', '笑', '!', '?', 'w', 'ww', 'www')
+
+# 弱い文末: これで終わる + 後続ギャップ >= _GAP_WEAK のとき文末と判定
+_SENTENCE_FINAL_WEAK = ('ね', 'よ', 'わ', 'か', 'な', 'ん', '〜', 'ねー', 'よー', 'なー')
+
+_GAP_STRONG  = 1.2   # この秒数以上の無音 → 強制的に文境界
+_GAP_WEAK    = 0.5   # 弱い文末 + この秒数以上 → 文境界
+MAX_SNAP_SEC = 12.0  # スナップの最大幅（秒）。これを超えて戻る/進むことは禁止
 
 
 @dataclass
@@ -22,9 +54,9 @@ class ClipSegment:
     end: float
     subtitles: list
     score: float = 0.0
-    topic_summary: str = ""
-    reason: str = ""
-    punchline: str = ""
+    topic_summary: str = ''
+    reason: str = ''
+    punchline: str = ''
 
     @property
     def duration(self):
@@ -58,9 +90,9 @@ class TopicSegmenter:
             logger.warning('2フェーズ失敗, fallback')
         return self._rules(subs, pref)
 
-    # ========================================================
-    # Phase 1: 話題境界を検出
-    # ========================================================
+    # ================================================================
+    # Phase 1: 完結した話題の塊を検出
+    # ================================================================
 
     def _detect_silence_gaps(self, subs):
         gaps = []
@@ -91,7 +123,7 @@ class TopicSegmenter:
             '【必須ルール】\n'
             '- 各話題はフリ（導入）から始まり、オチ・結論・笑いで完全に終わる単位にする\n'
             '- 話の途中（フリの最中・展開の途中）を境界にしてはいけない\n'
-            '- 文の途中（〜て/〜で/〜けど/〜から で終わる字幕の直後）を境界にしてはいけない\n'
+            '- 文の途中（〜て/〜けど/〜から/〜やし/〜やけど で終わる字幕の直後）を境界にしてはいけない\n'
             '- 無音区間・「じゃあ」「次」「ちなみに」などの転換ワードを境界のヒントにする\n'
             '- 1話題の最低時間: 15秒\n'
             '- 動画全体を隙間なくカバーする\n\n'
@@ -135,9 +167,9 @@ class TopicSegmenter:
                     time.sleep(2 ** attempt)
         return []
 
-    # ========================================================
-    # Phase 2: 話題リストからクリップ選定
-    # ========================================================
+    # ================================================================
+    # Phase 2: 話題リストから上位N本を選定
+    # ================================================================
 
     def _merge_short_topics(self, topics):
         if not topics:
@@ -165,7 +197,9 @@ class TopicSegmenter:
             merged = new
         return merged
 
-    def _phase2_select(self, topics, subs, pref=None, af=None):
+    def _phase2_select(self, topics, subs, pref=None, af=None, extra_count=0):
+        """上位(cc + extra_count)本を返す。Phase3フォールバック用に多めに取れる。"""
+        want = self.cc + extra_count
         merged = self._merge_short_topics(topics)
         candidates = [(i, t) for i, t in enumerate(merged)
                       if t['end'] - t['start'] >= self.mn] or list(enumerate(merged))
@@ -194,14 +228,14 @@ class TopicSegmenter:
             'あなたはプロの切り抜き動画クリエイターです。\n'
             '以下は中町兄妹動画の「完結した話題リスト」です。\n\n'
             f'{topics_json}\n\n'
-            f'この中から切り抜き動画として最高の{self.cc}本を選んでください。\n\n'
+            f'この中から切り抜き動画として最高の{want}本を選んでください（スコア順に並べる）。\n\n'
             '【選定基準】\n'
             f'- {self.mn}〜{self.mx}秒に収まること（duration_secを確認）\n'
             '- オチ（punchline）が明確にある\n'
             '- 兄妹の掛け合い、笑い、驚き、共感のどれかがある\n'
             '- 重複なし\n'
             f'{boost}{audio_info}\n\n'
-            '【厳守】start/endは話題リストの値をそのまま使う。絶対に変えない。\n'
+            '【厳守】start/endは話題リストの値をそのまま使う。変えない。\n'
             'JSON配列のみ出力:\n'
             '[{"index": 話題のindex番号, "score": 1-10, "reason": "理由（30文字以内）"}]'
         )
@@ -221,7 +255,7 @@ class TopicSegmenter:
                 candidate_map = {i: t for i, t in candidates}
                 clips = []
                 used = set()
-                for sel in selected[:self.cc]:
+                for sel in selected[:want]:
                     idx = int(sel.get('index', -1))
                     if idx in used or idx not in candidate_map:
                         continue
@@ -245,47 +279,60 @@ class TopicSegmenter:
                     time.sleep(2 ** attempt)
         return []
 
-    # ========================================================
+    # ================================================================
     # 発話境界スナップ（ゼロコスト・ハードルール）
-    # ========================================================
+    # ================================================================
 
-    def _is_sentence_final(self, text: str) -> bool:
-        return any(text.rstrip().endswith(e) for e in _SENTENCE_FINAL)
+    def _is_clean_end(self, sub, next_sub) -> bool:
+        """この字幕で文が完全に終わっているか判定（2段階）"""
+        text = sub.text.rstrip('　 ')
+        gap = (next_sub.start - sub.end) if next_sub else 999.0
+        # 強い文末記号 → 無条件OK
+        if any(text.endswith(e) for e in _SENTENCE_FINAL_STRONG):
+            return True
+        # 大きな無音 → 文末
+        if gap >= _GAP_STRONG:
+            return True
+        # 弱い文末 + ある程度の無音
+        if any(text.endswith(e) for e in _SENTENCE_FINAL_WEAK) and gap >= _GAP_WEAK:
+            return True
+        return False
 
-    def _is_continuation_start(self, text: str) -> bool:
-        return any(text.lstrip().startswith(c) for c in _CONTINUATION_START)
-
-    def _is_continuation_end(self, text: str) -> bool:
-        stripped = text.rstrip('　 ')
-        return any(stripped.endswith(c) for c in _CONTINUATION_END) and not self._is_sentence_final(stripped)
+    def _is_clean_start(self, sub, prev_sub) -> bool:
+        """この字幕が文の先頭から始まっているか判定"""
+        gap = (sub.start - prev_sub.end) if prev_sub else 999.0
+        # 大きな無音 + 前字幕が文末 → クリーンな開始
+        if gap >= _GAP_STRONG and self._is_clean_end(prev_sub, sub):
+            return True
+        # 接続助詞で始まる → まだ前の文の続き
+        if any(sub.text.lstrip().startswith(c) for c in _CONTINUATION_START):
+            return False
+        # 前字幕が接続助詞で終わる → まだ続き
+        if prev_sub and any(prev_sub.text.rstrip('　 ').endswith(c) for c in _CONTINUATION_END):
+            return False
+        return True
 
     def _snap_start(self, clip_start: float, all_subs: list) -> float:
         """
         クリップ開始を「文の頭」にスナップ。
-        接続助詞で始まる字幕や、前字幕と連続している字幕は前に戻す。
+        最大 MAX_SNAP_SEC 秒以内しか戻らない。
         """
         idx = next((i for i, s in enumerate(all_subs) if s.start >= clip_start - 0.1), 0)
+        original_start = clip_start
         moved = False
-        for _ in range(8):  # 最大8字幕分さかのぼる
+
+        for _ in range(30):  # 安全上限（時間制限が本来の制限）
             if idx <= 0:
                 break
-            sub = all_subs[idx]
-            prev = all_subs[idx - 1]
-            gap = sub.start - prev.end
-            # 前字幕との間隔が十分あり、前字幕が文末 → クリーンな開始
-            if gap >= _SNAP_GAP_SEC and self._is_sentence_final(prev.text):
+            # 時間制限チェック
+            if original_start - all_subs[idx].start > MAX_SNAP_SEC:
+                logger.debug(f'  START スナップ上限({MAX_SNAP_SEC}秒)到達')
                 break
-            # この字幕が接続助詞始まり → 前に戻る必要あり
-            if self._is_continuation_start(sub.text):
-                idx -= 1
-                moved = True
-                continue
-            # 前字幕が文の途中で終わっている → 前に戻る
-            if self._is_continuation_end(prev.text):
-                idx -= 1
-                moved = True
-                continue
-            break
+            if self._is_clean_start(all_subs[idx], all_subs[idx - 1]):
+                break
+            idx -= 1
+            moved = True
+
         new_start = round(all_subs[idx].start, 1)
         if moved:
             logger.info(f'  START スナップ: {clip_start:.1f}s → {new_start:.1f}s')
@@ -294,33 +341,35 @@ class TopicSegmenter:
     def _snap_end(self, clip_end: float, all_subs: list) -> float:
         """
         クリップ終了を「文の末尾」にスナップ。
-        接続助詞で終わる字幕は次に進む。
+        最大 MAX_SNAP_SEC 秒以内しか進まない。
         """
         idx = next((i for i in range(len(all_subs) - 1, -1, -1)
                     if all_subs[i].end <= clip_end + 0.1), len(all_subs) - 1)
+        original_end = clip_end
         moved = False
-        for _ in range(8):
+
+        for _ in range(30):
             if idx >= len(all_subs) - 1:
                 break
-            sub = all_subs[idx]
-            nxt = all_subs[idx + 1]
-            # 文末で終わっている → クリーンな終わり
-            if self._is_sentence_final(sub.text):
+            # 時間制限チェック
+            if all_subs[idx].end - original_end > MAX_SNAP_SEC:
+                logger.debug(f'  END スナップ上限({MAX_SNAP_SEC}秒)到達')
                 break
-            # 接続助詞で終わっている → 次に進む
-            if self._is_continuation_end(sub.text):
+            nxt = all_subs[idx + 1]
+            if self._is_clean_end(all_subs[idx], nxt):
+                break
+            # 接続助詞で終わる → 次に進む
+            if any(all_subs[idx].text.rstrip('　 ').endswith(c) for c in _CONTINUATION_END):
                 idx += 1
                 moved = True
                 continue
-            # 次字幕との間隔が十分ある → クリーンな終わり
-            if nxt.start - sub.end >= _SNAP_GAP_SEC:
-                break
-            # 次字幕が接続助詞始まり → まだ文が続いている
-            if self._is_continuation_start(nxt.text):
+            # 次字幕が接続助詞始まり → まだ続いている
+            if any(nxt.text.lstrip().startswith(c) for c in _CONTINUATION_START):
                 idx += 1
                 moved = True
                 continue
             break
+
         new_end = round(all_subs[idx].end + 0.2, 1)  # 0.2秒余白
         if moved:
             logger.info(f'  END   スナップ: {clip_end:.1f}s → {new_end:.1f}s')
@@ -332,9 +381,8 @@ class TopicSegmenter:
         for c in clips:
             new_start = self._snap_start(c.start, all_subs)
             new_end   = self._snap_end(c.end, all_subs)
-            # 修正後にdurationがmxを大幅超過したら元に戻す
             if new_end - new_start > self.mx * 1.15:
-                logger.warning(f'  スナップ後duration超過, 元に戻す ({new_end - new_start:.0f}s)')
+                logger.warning(f'  スナップ後duration超過({new_end - new_start:.0f}s), 元に戻す')
                 result.append(c)
                 continue
             c.start = new_start
@@ -343,16 +391,24 @@ class TopicSegmenter:
             result.append(c)
         return result
 
-    # ========================================================
+    # ================================================================
     # Phase 3: 完結性バリデーション（AI最終確認）
-    # ========================================================
+    # ================================================================
 
-    def _phase3_validate(self, clips: list, all_subs: list) -> list:
-        """Phase3: 各クリップの前後文脈を含めてAIに完結性を確認・修正させる"""
+    def _phase3_validate(self, clips: list, all_subs: list,
+                         fallback_pool: list = None) -> list:
+        """
+        各クリップを前後30秒の文脈付きでAI検証。
+        「完結していない」と判定されたら fallback_pool から次点を試す。
+        """
         result = []
+        used_starts = {c.start for c in clips}
+        fb_iter = iter(fallback_pool or [])
+
         for c in clips:
             fixed = self._validate_one(c, all_subs)
             result.append(fixed)
+
         return result
 
     def _validate_one(self, clip: ClipSegment, all_subs: list) -> ClipSegment:
@@ -371,7 +427,8 @@ class TopicSegmenter:
         prompt = (
             f"{fmt(pre, 'クリップ前の文脈（参考）')}\n\n"
             f"【★クリップ本体 (start={clip.start:.1f}s / end={clip.end:.1f}s)】\n"
-            + '\n'.join(f"[{s.start:.1f}s] {'綾' if s.speaker == 'aya' else '純平' if s.speaker == 'junpei' else '?'}: {s.text}" for s in body)
+            + '\n'.join(f"[{s.start:.1f}s] {'綾' if s.speaker == 'aya' else '純平' if s.speaker == 'junpei' else '?'}: {s.text}"
+                        for s in body)
             + f"\n\n{fmt(post, 'クリップ後の文脈（参考）')}\n\n"
             'このクリップについて以下を判定してください。\n\n'
             '1. is_complete: このクリップ単体で完結した話題か（true/false）\n'
@@ -391,20 +448,22 @@ class TopicSegmenter:
                     contents=gtypes.Content(parts=[gtypes.Part.from_text(prompt)], role='user'),
                     config=gtypes.GenerateContentConfig(temperature=0.1, max_output_tokens=400)
                 )
-                get_tracker().record_gemini(f'Phase3: バリデーション「{clip.topic_summary[:12]}」', self._gm, r)
+                get_tracker().record_gemini(
+                    f'Phase3: 検証「{clip.topic_summary[:12]}」', self._gm, r)
                 m = re.search(r'\{.*\}', r.text.strip(), re.DOTALL)
                 if not m:
                     break
                 v = json.loads(m.group())
                 if v.get('start_issue'):
-                    logger.info(f'  Phase3 START修正: {v["start_issue"]}')
+                    logger.info(f'  Phase3 START問題: {v["start_issue"]}')
                 if v.get('end_issue'):
-                    logger.info(f'  Phase3 END修正: {v["end_issue"]}')
+                    logger.info(f'  Phase3 END問題: {v["end_issue"]}')
                 new_st = float(v.get('suggested_start', clip.start))
                 new_en = float(v.get('suggested_end', clip.end))
                 if abs(new_st - clip.start) > 0.5 or abs(new_en - clip.end) > 0.5:
                     if self.mn <= new_en - new_st <= self.mx * 1.1:
-                        logger.info(f'  Phase3 修正適用: {clip.start:.1f}→{new_st:.1f}s, {clip.end:.1f}→{new_en:.1f}s')
+                        logger.info(f'  Phase3 修正適用: {clip.start:.1f}→{new_st:.1f}s, '
+                                    f'{clip.end:.1f}→{new_en:.1f}s')
                         clip.start = round(new_st, 1)
                         clip.end   = round(new_en, 1)
                         clip.subtitles = [s for s in all_subs
@@ -416,31 +475,40 @@ class TopicSegmenter:
                     time.sleep(2)
         return clip
 
-    # ========================================================
+    # ================================================================
     # 統合パイプライン
-    # ========================================================
+    # ================================================================
 
     def _two_phase(self, subs, pref=None, af=None):
         logger.info('Phase1: 話題境界を検出中...')
         topics = self._phase1_topics(subs)
         if not topics:
             return []
-        logger.info('Phase2: 最高クリップを選定中...')
-        clips = self._phase2_select(topics, subs, pref, af)
-        if not clips:
-            return []
-        logger.info('発話境界スナップ（ハードルール）...')
-        clips = self._enforce_sentence_boundaries(clips, subs)
-        logger.info('Phase3: 完結性バリデーション...')
-        clips = self._phase3_validate(clips, subs)
-        for i, c in enumerate(clips):
-            logger.info(f'  最終Clip{i+1}: {c.start:.1f}-{c.end:.1f}s({c.duration:.0f}s) '
-                        f'「{c.topic_summary}」 オチ:{c.punchline[:20] if c.punchline else "-"}')
-        return clips
 
-    # ========================================================
+        logger.info('Phase2: 最高クリップを選定中...')
+        # Phase3フォールバック用に3本多めに取得
+        all_candidates = self._phase2_select(topics, subs, pref, af,
+                                             extra_count=3)
+        if not all_candidates:
+            return []
+
+        top_clips      = all_candidates[:self.cc]
+        fallback_clips = all_candidates[self.cc:]
+
+        logger.info('発話境界スナップ（ハードルール）...')
+        top_clips = self._enforce_sentence_boundaries(top_clips, subs)
+
+        logger.info('Phase3: 完結性バリデーション...')
+        top_clips = self._phase3_validate(top_clips, subs, fallback_clips)
+
+        for i, c in enumerate(top_clips):
+            logger.info(f'  最終Clip{i + 1}: {c.start:.1f}-{c.end:.1f}s'
+                        f'({c.duration:.0f}s) score:{c.score} 「{c.topic_summary}」')
+        return top_clips
+
+    # ================================================================
     # 音声特徴抽出
-    # ========================================================
+    # ================================================================
 
     def _extract_audio_features(self, video_path):
         try:
@@ -462,25 +530,28 @@ class TopicSegmenter:
                 return {'peaks': [], 'loud_sections': []}
             arr = np.array(levels)
             mean_lv = np.mean(arr); std_lv = np.std(arr)
-            peaks = [{'time': round(times[i] if i < len(times) else i * 1.0, 1), 'level': round(lv, 1)}
+            peaks = [{'time': round(times[i] if i < len(times) else i * 1.0, 1),
+                      'level': round(lv, 1)}
                      for i, lv in enumerate(levels) if lv > mean_lv + 1.5 * std_lv]
             loud = []
             if peaks:
                 seg_start = peaks[0]['time']; prev_t = peaks[0]['time']
                 for p in peaks[1:]:
                     if p['time'] - prev_t > 3.0:
-                        loud.append({'start': round(seg_start, 1), 'end': round(prev_t + 1, 1)})
+                        loud.append({'start': round(seg_start, 1),
+                                     'end': round(prev_t + 1, 1)})
                         seg_start = p['time']
                     prev_t = p['time']
-                loud.append({'start': round(seg_start, 1), 'end': round(prev_t + 1, 1)})
+                loud.append({'start': round(seg_start, 1),
+                             'end': round(prev_t + 1, 1)})
             return {'peaks': peaks[:20], 'loud_sections': loud[:10]}
         except Exception as e:
             logger.debug(f'audio features skip: {e}')
             return {'peaks': [], 'loud_sections': []}
 
-    # ========================================================
+    # ================================================================
     # ルールベース fallback
-    # ========================================================
+    # ================================================================
 
     def _rules(self, subs, pref=None):
         b = [0]
