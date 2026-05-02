@@ -21,6 +21,7 @@ try:
 except ImportError:
     easyocr=None
 from src.utils import run_ffmpeg,get_video_resolution,get_video_duration
+from src.cost_tracker import get_tracker
 logger=logging.getLogger(__name__)
 FI=0.1
 
@@ -59,11 +60,8 @@ class SubtitleRecognizer:
         logger.info(f"CrossValidated:{len(merged)}")
         return merged
 
-    # === 0.1s精度 スマートOCR ===
-
     def _smart_ocr(self,vp):
-        w,h=get_video_resolution(vp)
-        sy=int(h*(1-self.srr));sh=h-sy
+        w,h=get_video_resolution(vp);sy=int(h*(1-self.srr));sh=h-sy
         fd=os.path.join(self.td,"f01")
         os.makedirs(fd,exist_ok=True)
         try:
@@ -100,8 +98,7 @@ class SubtitleRecognizer:
     def _ocr_cp(self,cp,af):
         res=[]
         for bi in range(0,len(cp),self.bs):
-            b=cp[bi:bi+self.bs]
-            ps=[c[1] for c in b];ix=[c[0] for c in b]
+            b=cp[bi:bi+self.bs];ps=[c[1] for c in b];ix=[c[0] for c in b]
             ts=[i*FI for i in ix]
             oc=self._gbr(ps,ts)
             res.extend([(ix[j],ts[j],oc[j][1],oc[j][2],oc[j][3]) for j in range(len(oc))])
@@ -121,8 +118,6 @@ class SubtitleRecognizer:
                 text=tx,speaker=sp,style=sy,confidence=0.95))
         return ent
 
-    # === Gemini OCR (MAX精度プロンプト) ===
-
     def _gbr(self,ps,ts):
         for a in range(self.mr):
             try:return self._gb(ps,ts)
@@ -139,10 +134,10 @@ class SubtitleRecognizer:
             "- 全ての文字を1文字たりとも間違えず正確に読む\n"
             "- 句読点、感嘆符、括弧も正確に\n"
             "- テキストがない画像は空文字を返す\n"
-            "- テキストの色を正確に判定: pink(ピンク系)、cyan(シアン/水色系)、other\n"
-            "- 文字サイズが周囲より明らかに大きい場合はemphasis、それ以外はnormal\n"
+            "- テキストの色: pink(ピンク系)、cyan(シアン/水色系)、other\n"
+            "- 文字サイズが大きい場合はemphasis、それ以外はnormal\n"
             "- 画像の枚数と同じ数の要素を必ず返す\n\n"
-            "【出力】JSON配列のみ。説明不要。\n"
+            "JSON配列のみ出力:\n"
             '[{"text":"正確なテキスト","color":"pink/cyan/other","style":"normal/emphasis"},...]'
         )
         pa=[gtypes.Part.from_text(prompt)]
@@ -153,6 +148,7 @@ class SubtitleRecognizer:
             model=self._gm,
             contents=gtypes.Content(parts=pa,role="user"),
             config=gtypes.GenerateContentConfig(temperature=0,max_output_tokens=1500))
+        get_tracker().record_gemini(f'OCR ({len(ps)}枚)', self._gm, r)
         m=re.search(r'\[.*\]',r.text.strip(),re.DOTALL)
         if not m:return [(t,"","unknown","normal") for t in ts]
         it=json.loads(m.group());res=[]
@@ -166,14 +162,9 @@ class SubtitleRecognizer:
             else:res.append((t,"","unknown","normal"))
         return res
 
-    # === Whisperクロス検証 ===
-
     def _cross_validate(self,whisper_segs,ocr_segs):
-        """クロス検証: OCRテキストを優先しつつ、
-        Whisperで誤認識を修正し、欠落を補完"""
         if not ocr_segs:return whisper_segs
         if not whisper_segs:return ocr_segs
-
         validated=[]
         for oc in ocr_segs:
             best_w=None;best_ov=0
@@ -182,33 +173,19 @@ class SubtitleRecognizer:
                 if ov_e>ov_s:
                     ov=ov_e-ov_s
                     if ov>best_ov:best_ov=ov;best_w=ws
-
             if best_w and best_ov>0.2:
-                # OCRテキストとWhisperテキストを比較
                 oc_clean=re.sub(r'[\s　、。、！？.,!?]','',oc.text)
                 ws_clean=re.sub(r'[\s　、。、！？.,!?]','',best_w.text)
-                # 類似度計算
                 sim=self._similarity(oc_clean,ws_clean)
                 if sim<0.3 and len(ws_clean)>3:
-                    # OCRが大きく間違っている可能性 → Whisperを採用
-                    logger.debug(f"OCR修正: '{oc.text}' -> '{best_w.text}' (sim={sim:.2f})")
-                    oc.text=best_w.text
-                    oc.confidence=0.7
+                    oc.text=best_w.text;oc.confidence=0.7
                 else:
                     oc.confidence=min(1.0,0.8+sim*0.2)
             validated.append(oc)
-
-        # WhisperにあってOCRにないセグメントを補完
         for ws in whisper_segs:
-            covered=any(
-                min(ws.end,o.end)-max(ws.start,o.start)>0.3
-                for o in ocr_segs
-            )
-            if not covered and ws.text.strip():
-                validated.append(ws)
-
+            covered=any(min(ws.end,o.end)-max(ws.start,o.start)>0.3 for o in ocr_segs)
+            if not covered and ws.text.strip():validated.append(ws)
         validated.sort(key=lambda e:e.start)
-        # 重複除去
         cleaned=[]
         for e in validated:
             if not e.text.strip() or e.end-e.start<0.2:continue
@@ -220,14 +197,10 @@ class SubtitleRecognizer:
         return cleaned
 
     def _similarity(self,a,b):
-        """簡易文字列類似度(0-1)"""
         if not a or not b:return 0.0
         sa,sb=set(a),set(b)
-        inter=len(sa&sb)
-        union=len(sa|sb)
-        return inter/union if union>0 else 0.0
-
-    # === Whisper ===
+        inter=len(sa&sb);union=len(sa|sb)
+        return inter/union if union else 0.0
 
     def _whisper(self,vp):
         au=os.path.join(self.td,"a.wav")
@@ -239,8 +212,6 @@ class SubtitleRecognizer:
                 speaker="unknown",style="normal") for x in r.get("segments",[]) if x["text"].strip()]
         finally:
             if os.path.exists(au):os.remove(au)
-
-    # === EasyOCR fallback ===
 
     def _easyocr(self,vp):
         if not cv2 or not easyocr:return []
