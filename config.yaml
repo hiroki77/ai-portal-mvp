@@ -15,10 +15,7 @@ download:
 transcription:
   whisper_model: "small"
   language: "ja"
-  # OCR: gemini (Gemini 2.0 Flash無料枚) / easyocr (フォールバック)
   ocr_engine: "gemini"
-  # Gemini APIキー (無料: https://aistudio.google.com/apikey)
-  # 環境変数 GEMINI_API_KEY でも可
   gemini_api_key: ""
   gemini_model: "gemini-2.0-flash"
   frame_interval: 0.5
@@ -47,19 +44,22 @@ video:
 monitor:
   check_interval: 300
   rss_url: ""
-# Google Drive設定
 drive:
   enabled: true
-  # 方式: rclone / shared_storage
-  # rclone: rcloneでGoogle Driveにアップロード
-  # shared_storage: Android共有ストレージに保存(Driveアプリが自動同期)
   method: "rclone"
-  # rcloneのリモート名 (rclone configで設定)
   rclone_remote: "gdrive"
-  # Drive上の保存先フォルダ
   remote_folder: "中町兄妹_切り抜き"
-  # shared_storage方式の保存先
   shared_path: "/storage/emulated/0/Movies/切り抜き"
+# TikTok自動投稿
+tiktok:
+  enabled: false          # trueにすると自動投稿
+  cookies_file: "./tiktok_cookies.txt"   # 初回認証で生成
+  hashtags:
+    - "#中町兄妹"
+    - "#切り抜き"
+    - "#shorts"
+    - "#tiktok"
+  schedule_delay_min: 0   # 投稿前の待機分数 (0=即投稿)
 insights:
   enabled: true
   data_file: "./data/insights.json"
