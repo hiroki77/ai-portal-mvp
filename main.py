@@ -22,6 +22,12 @@ def process_video(video, dl, tr, seg, proc, ins, drv):
         vp = dl.download(video["url"])
         subs = tr.recognize(vp)
         clips = seg.select_clips(subs, vp, ins.get_preferences())
+
+        if not clips:
+            logger.info("クリップ選定なし（話題検出0件）")
+            get_tracker().print_summary()
+            return []
+
         outputs = proc.create_clips_parallel(vp, clips, subs)
         for i, out in enumerate(outputs):
             c = clips[i] if i < len(clips) else clips[-1]

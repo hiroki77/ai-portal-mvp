@@ -28,8 +28,8 @@ from src.utils import run_ffmpeg, get_video_resolution, get_video_duration
 from src.cost_tracker import get_tracker
 logger = logging.getLogger(__name__)
 FI = 0.1
-WHISPER_API_MAX_MB = 24.0   # Whisper API のファイル制限（25MB）より小さく設定
-WHISPER_CHUNK_SEC  = 1200   # 20分別に分割
+WHISPER_API_MAX_MB = 24.0
+WHISPER_CHUNK_SEC  = 1200
 
 
 @dataclass
@@ -40,7 +40,7 @@ class SubtitleEntry:
     speaker: str
     style: str
     confidence: float = 1.0
-    words: list = field(default_factory=list)  # [{word, start, end}] Whisper APIの単語タイムスタンプ
+    words: list = field(default_factory=list)
 
     def to_dict(self):
         d = asdict(self)
@@ -51,7 +51,7 @@ class SubtitleEntry:
 class SubtitleRecognizer:
     DIFF_TH    = 12.0
     BRIGHT_TH  = 140
-    NO_SPEECH_TH = 0.8  # Whisper API: 非音声区間の間値
+    NO_SPEECH_TH = 0.8
 
     def __init__(self, config):
         tc = config['transcription']
@@ -61,17 +61,15 @@ class SubtitleRecognizer:
         self.bs            = tc.get('batch_size', 4)
         self.mr            = tc.get('max_retries', 3)
         self.td            = config['paths']['temp_dir']
-        self.whisper_engine = tc.get('whisper_engine', 'local')  # 'api' or 'local'
+        self.whisper_engine = tc.get('whisper_engine', 'local')
         self.wm            = tc.get('whisper_model', 'small')
 
-        # Gemini
         self._g  = None
         self._gm = tc.get('gemini_model', 'gemini-2.0-flash')
         gk = tc.get('gemini_api_key', '') or os.environ.get('GEMINI_API_KEY', '')
         if gk and genai:
             self._g = genai.Client(api_key=gk)
 
-        # OpenAI Whisper API
         self._oai = None
         ok = tc.get('openai_api_key', '') or os.environ.get('OPENAI_API_KEY', '')
         if ok and OpenAI:
@@ -104,7 +102,7 @@ class SubtitleRecognizer:
         return merged
 
     # =========================================================
-    # Whisper API (高速・高精度)
+    # Whisper API
     # =========================================================
 
     def _whisper(self, vp):
@@ -113,14 +111,7 @@ class SubtitleRecognizer:
         return self._whisper_local(vp)
 
     def _whisper_api(self, vp):
-        """
-        OpenAI Whisper APIで音声認識。
-        - 平均 2〜3分/本（ローカルの1/10）
-        - セグメント境界が已に文第境界に近い
-        - 各セグメントに no_speech_prob で非音声フィルタリングあり
-        """
         au = os.path.join(self.td, 'audio_api.mp3')
-        # 32kbps mono 16kHz: 長氷動画でも小サイズ・十分な品質
         run_ffmpeg(['-i', str(vp), '-vn', '-acodec', 'libmp3lame',
                     '-ar', '16000', '-ac', '1', '-b:a', '32k', au])
         duration = get_video_duration(vp)
@@ -132,6 +123,9 @@ class SubtitleRecognizer:
                 logger.info(f'  {file_mb:.1f}MB > {WHISPER_API_MAX_MB}MB → {WHISPER_CHUNK_SEC//60}分割りで処理')
                 return self._whisper_api_chunked(au, duration)
             return self._whisper_api_single(au, duration)
+        except Exception as e:
+            logger.warning(f'  Whisper API失敗({e}) → ローカルWhisperにフォールバック')
+            return self._whisper_local(vp)
         finally:
             if os.path.exists(au):
                 os.remove(au)
@@ -149,7 +143,6 @@ class SubtitleRecognizer:
         return self._parse_whisper_segments(tr.segments, tr.words if hasattr(tr, 'words') else [])
 
     def _whisper_api_chunked(self, au_path: str, duration: float) -> List[SubtitleEntry]:
-        """音声ファイルが大きい場合は WHISPER_CHUNK_SEC 秒ごとに分割して処理"""
         chunks = []
         offset = 0.0
         chunk_idx = 0
@@ -188,7 +181,6 @@ class SubtitleRecognizer:
         result = []
         word_list = list(words) if words else []
         for seg in segments:
-            # 非音声区間はスキップ
             if getattr(seg, 'no_speech_prob', 0.0) > self.NO_SPEECH_TH:
                 continue
             text = seg.text.strip()
@@ -196,7 +188,6 @@ class SubtitleRecognizer:
                 continue
             st = round(float(seg.start) + offset, 2)
             en = round(float(seg.end) + offset, 2)
-            # このセグメント内の単語タイムスタンプを取得
             seg_words = [
                 {'word': w.word, 'start': round(float(w.start) + offset, 2),
                  'end': round(float(w.end) + offset, 2)}
@@ -245,8 +236,9 @@ class SubtitleRecognizer:
         fd = os.path.join(self.td, 'f01')
         os.makedirs(fd, exist_ok=True)
         try:
+            # 40分動画のフレーム展開に十分なタイムアウト
             run_ffmpeg(['-i', str(vp), '-vf', f'fps=10,crop=iw:{sh}:0:{sy}',
-                        '-q:v', '2', os.path.join(fd, 'f_%07d.jpg')], timeout=1800)
+                        '-q:v', '2', os.path.join(fd, 'f_%07d.jpg')], timeout=3600)
             ff = sorted(Path(fd).glob('f_*.jpg'))
             if not ff:
                 return []
@@ -324,7 +316,7 @@ class SubtitleRecognizer:
             'あなたは最高精度のOCRエンジンです。'
             '以下の画像はYouTube動画の字幕(テロップ)部分です。\n\n'
             '【ルール】\n'
-            '- 全ての文字を1文字たりとも間違えず正確に読む\n'
+            '- 全ての文字1文字たりとも間違えず正確に読む\n'
             '- 句読点、感嘆符、括弧も正確に\n'
             '- テキストなし→空文字\n'
             '- 色: pink(ピンク)、cyan(シアン)、other\n'
@@ -362,10 +354,6 @@ class SubtitleRecognizer:
     # =========================================================
 
     def _cross_validate(self, whisper_segs, ocr_segs):
-        """
-        Whisper APIセグメントはテキスト精度が高いので優先。
-        OCRセグメントは話者識別(色)を付加するだけに使用。
-        """
         if not ocr_segs:
             return whisper_segs
         if not whisper_segs:
@@ -380,13 +368,11 @@ class SubtitleRecognizer:
                     ov = ov_e - ov_s
                     if ov > best_ov:
                         best_ov = ov; best_ocr = oc
-            # Whisperテキストをベースに、OCRから話者情報だけ取得
             if best_ocr and best_ocr.speaker != 'unknown':
                 ws.speaker = best_ocr.speaker
                 ws.style   = best_ocr.style
             validated.append(ws)
 
-        # WhisperにながOCRにあるセグメントはスキップ（Whisper APIの方がテキスト精度高）
         validated.sort(key=lambda e: e.start)
         cleaned = []
         for e in validated:
@@ -418,7 +404,7 @@ class SubtitleRecognizer:
         fd = os.path.join(self.td, 'foc'); os.makedirs(fd, exist_ok=True)
         try:
             run_ffmpeg(['-i', str(vp), '-vf', f'fps=10,crop=iw:{h-sy}:0:{sy}',
-                        '-q:v', '2', os.path.join(fd, 'f_%07d.jpg')], timeout=1800)
+                        '-q:v', '2', os.path.join(fd, 'f_%07d.jpg')], timeout=3600)
             if self._or is None:
                 self._or = easyocr.Reader(['ja', 'en'], gpu=False)
             pg = None; raw = []

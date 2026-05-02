@@ -19,25 +19,19 @@ on:
         type: string
 
 permissions:
-  contents: write   # 処理済みリストをコミットバックするため
+  contents: write
 
 jobs:
   clip:
     runs-on: ubuntu-latest
-    timeout-minutes: 180   # 最大3時間
+    timeout-minutes: 180
 
     steps:
-      # ────────────────────────────
-      # 1. コード取得
-      # ────────────────────────────
       - name: Checkout
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      # ────────────────────────────
-      # 2. Python 環境
-      # ────────────────────────────
       - name: Setup Python 3.11
         uses: actions/setup-python@v5
         with:
@@ -45,37 +39,35 @@ jobs:
           cache: 'pip'
           cache-dependency-path: requirements.cloud.txt
 
-      # ────────────────────────────
-      # 3. システム依存パッケージ
-      #    ffmpeg: 動画処理
-      #    fonts-noto-cjk: 日本語フォント（字幕焼き込み用）
-      # ────────────────────────────
+      # ffmpeg: 動画処理 / fonts-noto-cjk: 日本語フォント / rclone: Google Driveアップロード
       - name: Install system packages
         run: |
           sudo apt-get update -q
           sudo apt-get install -y --no-install-recommends \
             ffmpeg \
-            fonts-noto-cjk
+            fonts-noto-cjk \
+            rclone
 
-      # ────────────────────────────
-      # 4. Python ライブラリ（軽量版）
-      # ────────────────────────────
       - name: Install Python dependencies
         run: pip install -r requirements.cloud.txt
 
-      # ────────────────────────────
-      # 5. Google Drive (rclone) 設定
-      #    GitHub Secret "RCLONE_CONFIG" に
-      #    base64エンコードした rclone.conf を格納
-      # ────────────────────────────
+      # RCLONE_CONFIG 未設定の場合は Drive を無効化して続行
       - name: Setup rclone
         run: |
           mkdir -p ~/.config/rclone
-          printf '%s' "${{ secrets.RCLONE_CONFIG }}" | base64 -d > ~/.config/rclone/rclone.conf
+          if [ -n "${{ secrets.RCLONE_CONFIG }}" ]; then
+            printf '%s' "${{ secrets.RCLONE_CONFIG }}" | base64 -d > ~/.config/rclone/rclone.conf
+            echo "rclone 設定完了"
+          else
+            echo "RCLONE_CONFIG 未設定 → Google Drive アップロードをスキップ"
+            python -c "
+import yaml
+with open('config.yaml') as f: cfg = yaml.safe_load(f)
+cfg['drive']['enabled'] = False
+with open('config.yaml', 'w') as f: yaml.dump(cfg, f, allow_unicode=True)
+"
+          fi
 
-      # ────────────────────────────
-      # 6. 切り抜き実行
-      # ────────────────────────────
       - name: Run clipper
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -84,7 +76,6 @@ jobs:
         run: |
           mkdir -p output temp data logs fonts
 
-          # クリップ数を config 経由で渡す
           python - <<'PY'
           import yaml, os
           path = 'config.yaml'
@@ -101,27 +92,22 @@ jobs:
             python main.py --once
           fi
 
-      # ────────────────────────────
-      # 7. 処理済みリストをリポジトリに保存
-      #    次回実行時に重複処理を防ぐ
-      # ────────────────────────────
+      # 処理済みリストを保存して次回の重複処理を防ぐ
+      # -f で .gitignore を無視して強制追加
       - name: Save state
         if: always()
         run: |
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git config user.name "github-actions[bot]"
-          git add data/processed_videos.json 2>/dev/null || true
+          git add -f data/processed_videos.json 2>/dev/null || true
           git diff --staged --quiet || git commit -m "chore: update processed videos [skip ci]"
           git push || true
 
-      # ────────────────────────────
-      # 8. 完了サマリーを表示
-      # ────────────────────────────
       - name: Summary
         if: always()
         run: |
           echo "## 実行結果" >> $GITHUB_STEP_SUMMARY
-          if ls output/*.mp4 2>/dev/null | head -1 | grep -q mp4; then
+          if ls output/*.mp4 2>/dev/null | grep -q mp4; then
             COUNT=$(ls output/*.mp4 2>/dev/null | wc -l)
             echo "✅ 切り抜き動画 ${COUNT}本 → Google Drive にアップロード済み" >> $GITHUB_STEP_SUMMARY
           else
