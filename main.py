@@ -8,6 +8,7 @@ from src.segmenter import TopicSegmenter
 from src.processor import VideoProcessor
 from src.insights import InsightsEngine
 from src.drive_uploader import DriveUploader
+from src.cost_tracker import get_tracker, reset_tracker
 
 def process(mon,dl,tr,seg,proc,ins,drv):
     logger=logging.getLogger(__name__)
@@ -15,12 +16,12 @@ def process(mon,dl,tr,seg,proc,ins,drv):
         for v in mon.check_new_videos():
             logger.info(f"=== {v['title']} ===")
             send_termux_notification("新着動画",v["title"])
+            reset_tracker()  # 動画1本ごとにコストをリセット
             vp=None
             try:
                 vp=dl.download(v["url"])
                 subs=tr.recognize(vp)
                 clips=seg.select_clips(subs,vp,ins.get_preferences())
-                # 並列クリップ生成
                 outputs=proc.create_clips_parallel(vp,clips,subs)
                 for i,out in enumerate(outputs):
                     c=clips[i] if i<len(clips) else clips[-1]
@@ -28,10 +29,20 @@ def process(mon,dl,tr,seg,proc,ins,drv):
                     drv.upload(out)
                     logger.info(f"Clip{i+1} -> Drive: {out}")
                 mon.mark_processed(v["id"])
-                send_termux_notification("完了",f"{v['title']} {len(outputs)}本作成・Drive保存済")
+
+                # コスト集計・出力
+                tracker=get_tracker()
+                tracker.print_summary()
+                cost_jpy=tracker.total_usd()*155
+                send_termux_notification(
+                    f"完了 ({len(outputs)}本)",
+                    f"{v['title']}\nAPI費用: ¥{cost_jpy:.2f}"
+                )
             except Exception as e:
                 logger.error(f"Error: {e}",exc_info=True)
                 send_termux_notification("エラー",str(e)[:100])
+                # エラー時もコスト出力(途中まで使ったAPIコストを記録)
+                get_tracker().print_summary()
             finally:
                 if vp:dl.cleanup(vp)
     except Exception as e:
